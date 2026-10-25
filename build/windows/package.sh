@@ -33,6 +33,8 @@ node build/lib/policies/policyGenerator.ts build/lib/policies/policyData.jsonc w
 
 # node build/win32/explorer-dll-fetcher.ts .build/win32/appx
 
+bash ../build_agent_extension.sh
+
 npm run gulp "vscode-win32-${VSCODE_ARCH}-min-packing"
 
 . ../build_cli.sh

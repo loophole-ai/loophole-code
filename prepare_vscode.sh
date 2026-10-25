@@ -288,4 +288,7 @@ elif [[ "${OS_NAME}" == "windows" ]]; then
   sed -i 's|Microsoft Corporation|VSCodium|' build/win32/code.iss
 fi
 
+# Loophole: fix up branding metadata that upstream hardcodes
+. ../prepare_loophole.sh
+
 cd ..

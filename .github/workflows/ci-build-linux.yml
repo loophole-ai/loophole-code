@@ -23,8 +23,8 @@ on:
 
 env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
-  APP_NAME: VSCodium
-  BINARY_NAME: ${{ (github.ref == 'refs/heads/insider' || (github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'insider')) && 'codium-insiders' || 'codium' }}
+  APP_NAME: Loophole
+  BINARY_NAME: ${{ (github.ref == 'refs/heads/insider' || (github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'insider')) && 'loophole-insiders' || 'loophole' }}
   DISABLE_UPDATE: yes
   GH_REPO_PATH: ${{ github.repository }}
   GITHUB_BRANCH: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event.head }}
@@ -180,6 +180,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           npm_config_arch: ${{ matrix.npm_arch }}
+          AGENT_REPO: ${{ vars.AGENT_REPO }}
+          AGENT_REF: ${{ vars.AGENT_REF }}
+          AGENT_TOKEN: ${{ secrets.AGENT_TOKEN }}
         run: ./build/linux/package_bin.sh
         if: env.DISABLED != 'yes'
 

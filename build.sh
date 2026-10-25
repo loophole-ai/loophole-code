@@ -27,6 +27,7 @@ if [[ "${SHOULD_BUILD}" == "yes" ]]; then
     npm run copy-policy-dto --prefix build
     node build/lib/policies/policyGenerator.ts build/lib/policies/policyData.jsonc darwin
 
+    bash ../build_agent_extension.sh
     npm run gulp "vscode-darwin-${VSCODE_ARCH}-min-packing"
 
     find "../VSCode-darwin-${VSCODE_ARCH}" -print0 | xargs -0 touch -c
@@ -43,6 +44,7 @@ if [[ "${SHOULD_BUILD}" == "yes" ]]; then
       npm run copy-policy-dto --prefix build
       node build/lib/policies/policyGenerator.ts build/lib/policies/policyData.jsonc win32
 
+      bash ../build_agent_extension.sh
       npm run gulp "vscode-win32-${VSCODE_ARCH}-min-packing"
 
       if [[ "${VSCODE_ARCH}" != "x64" ]]; then
@@ -64,6 +66,7 @@ if [[ "${SHOULD_BUILD}" == "yes" ]]; then
       npm run copy-policy-dto --prefix build
       node build/lib/policies/policyGenerator.ts build/lib/policies/policyData.jsonc linux
 
+      bash ../build_agent_extension.sh
       npm run gulp "vscode-linux-${VSCODE_ARCH}-min-packing"
 
       find "../VSCode-linux-${VSCODE_ARCH}" -print0 | xargs -0 touch -c

@@ -654,5 +654,38 @@
     "gruntfuggly.todo-tree": {
       "default": false
     }
+  },
+  "nameShort": "Loophole",
+  "nameLong": "Loophole",
+  "applicationName": "loophole",
+  "dataFolderName": ".loophole",
+  "linuxIconName": "loophole",
+  "quality": "stable",
+  "urlProtocol": "loophole",
+  "serverApplicationName": "loophole-server",
+  "serverDataFolderName": ".loophole-server",
+  "darwinBundleIdentifier": "ai.loophole.ide",
+  "win32AppUserModelId": "Loophole.Loophole",
+  "win32DirName": "Loophole",
+  "win32MutexName": "loophole",
+  "win32NameVersion": "Loophole",
+  "win32RegValueName": "Loophole",
+  "win32ShellNameShort": "Loophole",
+  "win32AppId": "{{B2669F3C-27D6-4CF5-BEC0-E2E2E7A848EE}",
+  "win32x64AppId": "{{33DE76EB-1C6A-4DF1-9A65-49BFDCB01200}",
+  "win32arm64AppId": "{{E4DC3CCC-5EC4-46F3-94D2-6AA7C5DF6FCC}",
+  "win32UserAppId": "{{BBC5764A-7088-4D33-97B6-F900AB729417}",
+  "win32x64UserAppId": "{{DBE62ABB-0C24-4A5F-8EF5-64EF3EF48334}",
+  "win32arm64UserAppId": "{{640AC97F-A69A-451F-AEBE-52C1BBB4987D}",
+  "tunnelApplicationName": "loophole-tunnel",
+  "win32TunnelServiceMutex": "loophole-tunnelservice",
+  "win32TunnelMutex": "loophole-tunnel",
+  "win32ContextMenu": {
+    "x64": {
+      "clsid": "52F20357-C14A-491A-913B-CAD35275A13C"
+    },
+    "arm64": {
+      "clsid": "1C6D3D3C-9C50-4AA7-B3DC-B60081AF3574"
+    }
   }
 }

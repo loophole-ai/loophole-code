@@ -141,6 +141,8 @@ find .build/extensions -type f -name '*.node' -print -delete
 npm run copy-policy-dto --prefix build
 node build/lib/policies/policyGenerator.ts build/lib/policies/policyData.jsonc linux
 
+bash ../build_agent_extension.sh
+
 npm run gulp "vscode-linux-${VSCODE_ARCH}-min-packing"
 
 if [[ -f "../build/linux/${VSCODE_ARCH}/ripgrep.sh" ]]; then

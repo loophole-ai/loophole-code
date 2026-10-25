@@ -22,8 +22,9 @@ on:
       - "**/*.md"
 
 env:
-  APP_NAME: VSCodium
-  BINARY_NAME: ${{ (github.ref == 'refs/heads/insider' || (github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'insider')) && 'codium-insiders' || 'codium' }}
+  APP_NAME: Loophole
+  DISABLE_UPDATE: yes
+  BINARY_NAME: ${{ (github.ref == 'refs/heads/insider' || (github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'insider')) && 'loophole-insiders' || 'loophole' }}
   GH_REPO_PATH: ${{ github.repository }}
   GITHUB_BRANCH: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event.head }}
   ORG_NAME: ${{ github.repository_owner }}
@@ -76,6 +77,9 @@ jobs:
         env:
           SHOULD_BUILD: yes
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AGENT_REPO: ${{ vars.AGENT_REPO }}
+          AGENT_REF: ${{ vars.AGENT_REF }}
+          AGENT_TOKEN: ${{ secrets.AGENT_TOKEN }}
         run: ./build.sh
 
       - name: Prepare assets
