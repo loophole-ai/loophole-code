@@ -14,9 +14,22 @@ our branding, bundles the agent extension, and produces installers.
 | `build.sh`, `build/linux/package_bin.sh`, `build/windows/package.sh` | One line each: call the script above right before packaging |
 | `.github/workflows/ci-build-*.yml` | `APP_NAME`/`BINARY_NAME`, `DISABLE_UPDATE`, `AGENT_*` passed to the packaging step |
 | `.github/workflows/publish-*.yml` | Removed (VSCodium's own release/store publishing) |
+| `icons/loophole/`, `src/stable/resources/**`, `build/windows/msi/resources/stable/` | All app, installer, file-type and watermark images, generated from one vector mark by `icons/loophole/build_icons.py` |
 | `dev/verify-patches.sh` | Fast check that every patch still applies (no compile) |
 
 Custom core patches (when an extension can't do something) go in `patches/user/*.patch`.
+
+## Changing the logo
+
+Replace `icons/loophole/source-logo.png` (white mark on a dark square, 1024px or larger is best) and run:
+
+```
+pip install pillow potracer numpy
+./dev/verify-patches.sh            # creates the vscode/ checkout the file-type icons are built from
+python3 icons/loophole/build_icons.py --retrace icons/loophole/source-logo.png
+```
+
+Commit the regenerated files. Only the **stable** channel is generated; `src/insider/` and `icons/insider/` are unused leftovers from upstream.
 
 ## First build
 
