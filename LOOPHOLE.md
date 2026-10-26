@@ -47,6 +47,8 @@ Commit the regenerated files. Only the **stable** channel is generated; `src/ins
 
 - Agent engine is compiled on the build machine, so it is injected only when the runner's CPU matches the target.
   Windows arm64 (built on an x64 runner), armhf, riscv64, loong64, ppc64le therefore ship **without** the agent.
+- Windows MSI is switched off (`SHOULD_BUILD_MSI: 'no'` in `ci-build-windows.yml`): upstream's MSI still uses VSCodium's
+  upgrade code, GUIDs and file names and must be rebranded first. The `.exe` installers and the zip are built.
 - Installers are unsigned. macOS needs signing + notarization to open without a warning; Windows shows SmartScreen.
 - Auto-update is disabled (`DISABLE_UPDATE=yes`) until we have our own versions feed.
 - Upgrading VS Code: bump `upstream/stable.json`, run `dev/verify-patches.sh`, fix any patch that no longer applies.
