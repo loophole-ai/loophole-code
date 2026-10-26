@@ -170,3 +170,21 @@ jobs:
           path: assets/
           retention-days: 3
         if: github.event.inputs.generate_assets == 'true'
+
+      # Convenience link so the installer can be downloaded without going through the Actions artifact page.
+      # Anonymous Gofile upload: anyone with the link can download it, and the link shows up in this run's log.
+      # Don't keep this step once the proprietary agent is bundled into the installer.
+      - name: Upload installer to Gofile
+        if: github.event.inputs.generate_assets == 'true'
+        continue-on-error: true
+        run: |
+          FILE="$(ls assets/*UserSetup-${VSCODE_ARCH}-*.exe | head -n 1)"
+          echo "Uploading ${FILE} ($(du -h "${FILE}" | cut -f1))"
+          RESPONSE="$(curl -sS --fail --retry 3 --max-time 900 -F "file=@${FILE}" https://upload.gofile.io/uploadfile)"
+          LINK="$(echo "${RESPONSE}" | grep -o '"downloadPage":"[^"]*"' | cut -d'"' -f4)"
+          if [[ -z "${LINK}" ]]; then
+            echo "Gofile did not return a download link. Response: ${RESPONSE}"
+            exit 1
+          fi
+          echo "Download (${VSCODE_ARCH}): ${LINK}"
+          echo "### Loophole ${VSCODE_ARCH} installer: ${LINK}" >> "${GITHUB_STEP_SUMMARY}"
