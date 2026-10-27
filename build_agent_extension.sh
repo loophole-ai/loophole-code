@@ -47,7 +47,17 @@ else
   # don't leave the token in the cloned repo's config
   git -C "${WORK}/agent" remote set-url origin "https://github.com/${AGENT_REPO}.git"
 
-  command -v bun >/dev/null 2>&1 || npm install -g bun
+  # Use the exact bun the agent repo pins (its lockfile format depends on the version).
+  BUN_WANT="$( node -p "(require(process.argv[1]).packageManager || '').split('@')[1] || ''" "${WORK}/agent/package.json" )"
+  if [[ -n "${BUN_WANT}" ]]; then
+    if ! command -v bun >/dev/null 2>&1 || [[ "$( bun --version )" != "${BUN_WANT}" ]]; then
+      npm install -g "bun@${BUN_WANT}"
+    fi
+  else
+    command -v bun >/dev/null 2>&1 || npm install -g bun
+  fi
+  hash -r
+  echo "build_agent_extension: using bun $( bun --version )"
   pushd "${WORK}/agent" >/dev/null
   bun install --frozen-lockfile
   cd packages/kilo-vscode
@@ -63,4 +73,5 @@ node "${HERE}/build/agent/unzip_vsix.cjs" "${VSIX}" "${DEST}" "${REQUIRE_FROM}"
 find "${DEST}" -name '*.map' -type f -delete        # source maps are large and not needed at runtime
 
 test -f "${DEST}/package.json" || { echo "build_agent_extension: no package.json in ${DEST}" >&2; exit 1; }
-echo "build_agent_extension: installed $( node -p "require('${DEST}/package.json').name + '@' + require('${DEST}/package.json').version" ) into ${DEST}"
+# pass the path as an argument (not inside the JS string) so Git Bash on Windows converts it for node
+echo "build_agent_extension: installed $( node -p "const p = require(process.argv[1]); p.name + '@' + p.version" "${DEST}/package.json" ) into ${DEST}"

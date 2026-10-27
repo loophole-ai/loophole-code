@@ -43,6 +43,16 @@ Commit the regenerated files. Only the **stable** channel is generated; `src/ins
 4. **Actions → CI - Build - Linux → Run workflow**, tick **Generate assets**. Binaries appear under the run's *Artifacts*.
 5. Once that works: set `AGENT_REPO`, re-run, then enable macOS and Windows.
 
+## The agent (Kilo fork)
+
+The agent is a fork of [Kilo-Org/kilocode](https://github.com/Kilo-Org/kilocode) (MIT), kept in its own repo and
+bundled into the installer as a built-in extension. Set the repo variable `AGENT_REPO` (e.g. `loophole-ai/loophole-agent`)
+and the next build includes it. A fork of a public repo is public, so `AGENT_TOKEN` is not needed.
+
+Our changes to Kilo are intentionally tiny: `packages/kilo-vscode/script/loophole-brand.ts` re-applies the text branding and
+hard-disables telemetry, and the five icon files are replaced. After merging upstream Kilo, run
+`bun packages/kilo-vscode/script/loophole-brand.ts`; it fails loudly if upstream changed a line it edits.
+
 ## Known limits
 
 - Agent engine is compiled on the build machine, so it is injected only when the runner's CPU matches the target.
