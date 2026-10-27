@@ -1,0 +1,57 @@
+diff --git a/build/npm/postinstall.ts b/build/npm/postinstall.ts
+--- a/build/npm/postinstall.ts
++++ b/build/npm/postinstall.ts
+@@ -53,6 +53,35 @@
+ 	});
+ }
+ 
++// Loophole: a spawn failure (ENOENT) is a rare, transient CreateProcess error on busy Windows runners, but it is also what
++// Node reports when the working directory is missing. Retry a few times, and if it keeps failing say *why* instead of
++// only printing "spawn cmd.exe ENOENT".
++async function spawnAsyncWithRetry(dir: string, command: string, args: string[], opts: child_process.SpawnOptions): Promise<string> {
++	const attempts = 3;
++	for (let attempt = 1; ; attempt++) {
++		const cwd = typeof opts.cwd === 'string' ? opts.cwd : undefined;
++		if (cwd && !fs.existsSync(cwd)) {
++			throw new Error(`[${dir}] cannot install: working directory does not exist: ${cwd}`);
++		}
++		try {
++			return await spawnAsync(command, args, opts);
++		} catch (err) {
++			const code = (err as NodeJS.ErrnoException)?.code;
++			if (code !== 'ENOENT') {
++				throw err;
++			}
++			if (attempt >= attempts) {
++				const comspec = process.env['ComSpec'] || process.env['COMSPEC'];
++				throw new Error(`[${dir}] spawn failed with ENOENT after ${attempts} attempts: ${(err as Error).message}\n`
++					+ `  cwd exists: ${cwd ? fs.existsSync(cwd) : 'n/a'}, ComSpec=${comspec}, ComSpec exists: ${comspec ? fs.existsSync(comspec) : 'n/a'}, `
++					+ `free memory: ${Math.round(os.freemem() / 1048576)} MB`);
++			}
++			log(dir, `spawn failed with ENOENT, retrying (${attempt}/${attempts - 1})...`);
++			await new Promise(resolve => setTimeout(resolve, 5000 * attempt));
++		}
++	}
++}
++
+ async function npmInstallAsync(dir: string, opts?: child_process.SpawnOptions): Promise<void> {
+ 	const finalOpts: child_process.SpawnOptions = {
+ 		env: { ...process.env },
+@@ -91,7 +120,7 @@
+ 		run('sudo', ['chown', '-R', `${userinfo.uid}:${userinfo.gid}`, `${path.resolve(root, dir)}`], syncOpts);
+ 	} else {
+ 		log(dir, 'Installing dependencies...');
+-		const output = await spawnAsync(npm, command.split(' '), finalOpts);
++		const output = await spawnAsyncWithRetry(dir, npm, command.split(' '), finalOpts);
+ 		if (output.trim()) {
+ 			for (const line of output.trim().split('\n')) {
+ 				log(dir, line);
+@@ -314,7 +343,7 @@
+ 	}
+ 
+ 	// JS-only dirs run in parallel
+-	const concurrency = Math.min(os.cpus().length, 8);
++	const concurrency = process.platform === 'win32' ? Math.min(os.cpus().length, 2) : Math.min(os.cpus().length, 8);
+ 	log('.', `Running ${parallelTasks.length} npm installs with concurrency ${concurrency}...`);
+ 	await runWithConcurrency(parallelTasks, concurrency);
+ 

@@ -17,7 +17,9 @@ our branding, bundles the agent extension, and produces installers.
 | `icons/loophole/`, `src/stable/resources/**`, `build/windows/msi/resources/stable/` | All app, installer, file-type and watermark images, generated from one vector mark by `icons/loophole/build_icons.py` |
 | `dev/verify-patches.sh` | Fast check that every patch still applies (no compile) |
 
-Custom core patches (when an extension can't do something) go in `patches/user/*.patch`.
+Custom core patches (when an extension can't do something) go in `patches/user/*.patch`. Currently one:
+`loophole-postinstall-resilience.patch` retries `spawn ... ENOENT` during VS Code's extension `npm ci` (seen on Windows runners),
+runs at most 2 installs in parallel on Windows, and prints diagnostics if it still fails.
 
 ## Changing the logo
 
