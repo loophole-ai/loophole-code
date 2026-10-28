@@ -1,0 +1,818 @@
+From 50113a0ea724d0bc633fbc37b743a205e1561caa Mon Sep 17 00:00:00 2001
+From: Garv <garvagnihotri22@gmail.com>
+Date: Wed, 28 Oct 2026 09:30:00 +0000
+Subject: [PATCH] feat(onboarding): add the Loophole first-run onboarding
+
+- new LoopholeOnboarding overlay (port of Void's VoidOnboarding.tsx as plain DOM, no React/Tailwind build step):
+  1. welcome page with the animated logo and "Get Started"
+  2. theme picker with Loophole Dark, Loophole Light, Dark 2026 and Light 2026; picking one applies it right away.
+     The preview cards are drawn from the real theme colors.
+  3. settings import from VS Code, Cursor and Windsurf (IExtensionTransferService), then "Enter Loophole"
+- the provider page is dropped, the Kilo agent has its own sign-in and model setup.
+- shown once on the first start (storage key loopholeOnboarding.completed), not with --skip-welcome.
+  "Skip" is available until the last page. Re-open it with "Show Loophole Onboarding" (Help category, F1).
+- if the imported settings.json does not set a theme, the theme picked on page 2 is applied again.
+- follows the --vscode-* theme colors, honors reduced motion, keeps keyboard focus inside the overlay.
+- the logo is a CSS mask of the Loophole mark (loophole-mark.svg), tinted with the foreground color.
+---
+ .../browser/loopholeOnboarding.ts             | 360 ++++++++++++++++++
+ .../browser/media/loophole-mark.svg           |   4 +
+ .../browser/media/loopholeOnboarding.css      | 275 +++++++++++++
+ .../common/loopholeOnboarding.ts              |  22 ++
+ .../loopholeOnboarding.contribution.ts        |  80 ++++
+ src/vs/workbench/workbench.desktop.main.ts    |   3 +
+ 6 files changed, 744 insertions(+)
+ create mode 100644 src/vs/workbench/contrib/loopholeOnboarding/browser/loopholeOnboarding.ts
+ create mode 100644 src/vs/workbench/contrib/loopholeOnboarding/browser/media/loophole-mark.svg
+ create mode 100644 src/vs/workbench/contrib/loopholeOnboarding/browser/media/loopholeOnboarding.css
+ create mode 100644 src/vs/workbench/contrib/loopholeOnboarding/common/loopholeOnboarding.ts
+ create mode 100644 src/vs/workbench/contrib/loopholeOnboarding/electron-browser/loopholeOnboarding.contribution.ts
+
+diff --git a/src/vs/workbench/contrib/loopholeOnboarding/browser/loopholeOnboarding.ts b/src/vs/workbench/contrib/loopholeOnboarding/browser/loopholeOnboarding.ts
+new file mode 100644
+index 00000000..2f6e1c52
+--- /dev/null
++++ b/src/vs/workbench/contrib/loopholeOnboarding/browser/loopholeOnboarding.ts
+@@ -0,0 +1,360 @@
++/*--------------------------------------------------------------------------------------
++ *  Copyright 2026 Loophole AI, Inc. All rights reserved.
++ *  See LICENSE.txt for more information.
++ *--------------------------------------------------------------------------------------*/
++
++import './media/loopholeOnboarding.css';
++import { $, addDisposableListener, append, clearNode, EventType, getActiveElement, getWindow } from '../../../../base/browser/dom.js';
++import { Button } from '../../../../base/browser/ui/button/button.js';
++import { disposableTimeout } from '../../../../base/common/async.js';
++import { Emitter, Event } from '../../../../base/common/event.js';
++import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
++import { localize } from '../../../../nls.js';
++import { ConfigurationTarget, IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
++import { defaultButtonStyles } from '../../../../platform/theme/browser/defaultStyles.js';
++import { editorBackground, editorForeground } from '../../../../platform/theme/common/colors/editorColors.js';
++import { ACTIVITY_BAR_BACKGROUND, TITLE_BAR_ACTIVE_BACKGROUND } from '../../../common/theme.js';
++import { IWorkbenchColorTheme, IWorkbenchThemeService } from '../../../services/themes/common/workbenchThemeService.js';
++import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
++import { IExtensionTransferService, TransferEditorType, transferEditorTypes, TransferItemKind } from '../common/extensionTransfer.js';
++import { LOOPHOLE_ONBOARDING_THEMES } from '../common/loopholeOnboarding.js';
++
++interface IThemeCard {
++	readonly id: string;
++	readonly name: string;
++	readonly theme: IWorkbenchColorTheme;
++}
++
++const FADE_OUT_MS = 500;
++
++/**
++ * Full-window first-run experience: welcome, theme picker and import from another editor.
++ * Plain DOM (no framework), colored with the `--vscode-*` variables so it follows whichever theme is active.
++ */
++export class LoopholeOnboarding extends Disposable {
++
++	private readonly _onDidComplete = this._register(new Emitter<void>());
++	/** Fires when the person enters Loophole or skips. */
++	readonly onDidComplete: Event<void> = this._onDidComplete.event;
++
++	private readonly root: HTMLElement;
++	private readonly content: HTMLElement;
++	private readonly dots: HTMLElement[] = [];
++	private readonly skipButton: HTMLButtonElement;
++	private readonly pageDisposables = this._register(new DisposableStore());
++
++	private readonly previouslyFocused = getActiveElement();
++	private themeCards: Promise<IThemeCard[]> | undefined;
++	private selectedThemeId: string | undefined;
++	private completed = false;
++
++	private readonly pages: ReadonlyArray<(store: DisposableStore) => HTMLElement | undefined> = [
++		store => this.renderWelcome(store),
++		store => this.renderThemes(store),
++		store => this.renderImport(store),
++	];
++
++	constructor(
++		@ILayoutService private readonly layoutService: ILayoutService,
++		@IWorkbenchThemeService private readonly themeService: IWorkbenchThemeService,
++		@IConfigurationService private readonly configurationService: IConfigurationService,
++		@IExtensionTransferService private readonly extensionTransferService: IExtensionTransferService,
++	) {
++		super();
++
++		this.root = $('.loophole-onboarding');
++		this.root.setAttribute('role', 'dialog');
++		this.root.setAttribute('aria-modal', 'true');
++		this.root.setAttribute('aria-label', localize('loopholeOnboarding.label', "Welcome to Loophole"));
++
++		this.skipButton = append(this.root, $('button.loophole-onboarding-skip', { type: 'button' })) as HTMLButtonElement;
++		this.skipButton.textContent = localize('loopholeOnboarding.skip', "Skip");
++		this._register(addDisposableListener(this.skipButton, EventType.CLICK, () => this.complete()));
++
++		this.content = append(this.root, $('.loophole-onboarding-content'));
++
++		const dots = append(this.root, $('.loophole-onboarding-dots'));
++		dots.setAttribute('aria-hidden', 'true');
++		for (let i = 0; i < this.pages.length; i++) {
++			this.dots.push(append(dots, $('span.loophole-onboarding-dot')));
++		}
++
++		// keep keyboard focus inside the overlay, the workbench is covered by it
++		this._register(addDisposableListener(this.root, EventType.KEY_DOWN, e => this.trapFocus(e)));
++
++		this.layoutService.mainContainer.appendChild(this.root);
++		this.showPage(0);
++	}
++
++	// ---------------- pages ----------------
++
++	private showPage(index: number): void {
++		this.pageDisposables.clear();
++		clearNode(this.content);
++
++		const page = this.pages[index](this.pageDisposables);
++		if (page) {
++			this.content.appendChild(page);
++		}
++
++		this.dots.forEach((dot, i) => dot.classList.toggle('active', i === index));
++		this.skipButton.classList.toggle('hidden', index === this.pages.length - 1);
++
++		const focusTarget = this.content.querySelector<HTMLElement>('.loophole-onboarding-primary');
++		focusTarget?.focus();
++	}
++
++	private renderWelcome(store: DisposableStore): HTMLElement {
++		const page = $('.loophole-onboarding-page.welcome');
++
++		append(page, $('.loophole-onboarding-logo')).setAttribute('aria-hidden', 'true');
++		append(page, $('h1.loophole-onboarding-title')).textContent = localize('loopholeOnboarding.welcome', "Welcome to Loophole");
++
++		const actions = append(page, $('.loophole-onboarding-actions.fade-in-late'));
++		this.addButton(store, actions, localize('loopholeOnboarding.getStarted', "Get Started"), () => this.showPage(1), { primary: true });
++
++		return page;
++	}
++
++	private renderThemes(store: DisposableStore): HTMLElement {
++		const page = $('.loophole-onboarding-page');
++		append(page, $('h1.loophole-onboarding-title')).textContent = localize('loopholeOnboarding.chooseTheme', "Choose your theme");
++
++		const grid = append(page, $('.loophole-onboarding-themes'));
++		grid.setAttribute('role', 'group');
++		grid.setAttribute('aria-label', localize('loopholeOnboarding.themes', "Color themes"));
++
++		this.getThemeCards().then(cards => {
++			if (store.isDisposed) {
++				return;
++			}
++
++			const current = this.themeService.getColorTheme().settingsId;
++			this.selectedThemeId ??= cards.find(card => card.id === current)?.id;
++
++			const buttons: HTMLButtonElement[] = [];
++			const updateSelection = () => buttons.forEach(button => {
++				const selected = button.dataset.themeId === this.selectedThemeId;
++				button.classList.toggle('selected', selected);
++				button.setAttribute('aria-pressed', String(selected));
++			});
++
++			for (const card of cards) {
++				const button = append(grid, $('button.loophole-onboarding-theme', { type: 'button' })) as HTMLButtonElement;
++				button.dataset.themeId = card.id;
++				this.renderThemePreview(append(button, $('.preview')), card.theme);
++				append(button, $('.name')).textContent = card.name;
++				append(button, $('.check.codicon.codicon-check'));
++				buttons.push(button);
++
++				store.add(addDisposableListener(button, EventType.CLICK, () => {
++					this.selectedThemeId = card.id;
++					updateSelection();
++					this.themeService.setColorTheme(card.theme, ConfigurationTarget.USER);
++				}));
++			}
++
++			updateSelection();
++		});
++
++		const actions = append(page, $('.loophole-onboarding-actions'));
++		this.addButton(store, actions, localize('loopholeOnboarding.back', "Back"), () => this.showPage(0), { primary: false });
++		this.addButton(store, actions, localize('loopholeOnboarding.next', "Next"), () => this.showPage(2), { primary: true });
++
++		return page;
++	}
++
++	private renderImport(store: DisposableStore): HTMLElement {
++		const page = $('.loophole-onboarding-page');
++		append(page, $('h1.loophole-onboarding-title')).textContent = localize('loopholeOnboarding.importTitle', "Import your settings");
++		append(page, $('p.loophole-onboarding-subtitle')).textContent = localize('loopholeOnboarding.importDescription', "Bring your settings, keybindings and extensions over from another editor. Files that already exist in Loophole are backed up first.");
++
++		const importButtons = append(page, $('.loophole-onboarding-import'));
++		const status = append(page, $('.loophole-onboarding-status'));
++		status.setAttribute('role', 'status');
++
++		const buttons: Button[] = [];
++		for (const editor of transferEditorTypes) {
++			const button = this.addButton(store, importButtons, localize('loopholeOnboarding.importFrom', "Import from {0}", editor), async () => {
++				buttons.forEach(b => b.enabled = false);
++				status.className = 'loophole-onboarding-status';
++				status.textContent = localize('loopholeOnboarding.importing', "Importing from {0}…", editor);
++
++				try {
++					await this.importFrom(editor, status);
++				} finally {
++					buttons.forEach(b => b.enabled = true);
++				}
++			}, { primary: false });
++			buttons.push(button);
++		}
++
++		const actions = append(page, $('.loophole-onboarding-actions'));
++		this.addButton(store, actions, localize('loopholeOnboarding.back', "Back"), () => this.showPage(1), { primary: false });
++		this.addButton(store, actions, localize('loopholeOnboarding.enter', "Enter Loophole"), () => this.complete(), { primary: true });
++
++		return page;
++	}
++
++	// ---------------- import ----------------
++
++	private async importFrom(editor: TransferEditorType, status: HTMLElement): Promise<void> {
++		let imported: readonly TransferItemKind[] = [];
++		let errors: readonly string[] = [];
++		try {
++			({ imported, errors } = await this.extensionTransferService.transferFromEditor(editor));
++		} catch (error) {
++			errors = [String(error instanceof Error ? error.message : error)];
++		}
++
++		if (imported.includes('settings')) {
++			await this.keepChosenTheme();
++		}
++
++		if (errors.length) {
++			status.classList.add('error');
++			status.textContent = localize('loopholeOnboarding.importFailed', "Could not import everything from {0}:\n{1}", editor, errors.join('\n'));
++		} else if (imported.length === 0) {
++			status.textContent = localize('loopholeOnboarding.importNothing', "No {0} settings were found on this computer.", editor);
++		} else {
++			status.classList.add('success');
++			status.textContent = localize('loopholeOnboarding.importDone', "Imported from {0}. Restart Loophole if the imported extensions do not show up.", editor);
++		}
++	}
++
++	/** Importing replaces settings.json: if it did not set a theme, bring back the one picked on the theme page. */
++	private async keepChosenTheme(): Promise<void> {
++		if (!this.selectedThemeId) {
++			return;
++		}
++
++		await this.configurationService.reloadConfiguration(ConfigurationTarget.USER);
++		if (this.configurationService.inspect('workbench.colorTheme').userValue === undefined) {
++			const card = (await this.getThemeCards()).find(c => c.id === this.selectedThemeId);
++			if (card) {
++				await this.themeService.setColorTheme(card.theme, ConfigurationTarget.USER);
++			}
++		}
++	}
++
++	// ---------------- themes ----------------
++
++	private getThemeCards(): Promise<IThemeCard[]> {
++		this.themeCards ??= this.themeService.getColorThemes().then(themes => {
++			const cards: IThemeCard[] = [];
++			for (const id of LOOPHOLE_ONBOARDING_THEMES) {
++				const theme = themes.find(t => t.settingsId === id);
++				if (theme) {
++					cards.push({ id, name: theme.label, theme });
++				}
++			}
++			return cards;
++		});
++		return this.themeCards;
++	}
++
++	/** A tiny editor drawn with the colors of the theme itself, so every card is accurate. */
++	private renderThemePreview(preview: HTMLElement, theme: IWorkbenchColorTheme): void {
++		const foreground = theme.getColor(editorForeground)?.toString();
++		const style = preview.style;
++		style.setProperty('--preview-background', theme.getColor(editorBackground)?.toString() ?? 'transparent');
++		style.setProperty('--preview-foreground', foreground ?? 'inherit');
++		style.setProperty('--preview-bar', (theme.getColor(TITLE_BAR_ACTIVE_BACKGROUND) ?? theme.getColor(ACTIVITY_BAR_BACKGROUND))?.toString() ?? 'transparent');
++		style.setProperty('--preview-keyword', tokenColor(theme, ['keyword', 'storage.type'], foreground));
++		style.setProperty('--preview-function', tokenColor(theme, ['entity.name.function', 'support.function'], foreground));
++		style.setProperty('--preview-comment', tokenColor(theme, ['comment'], foreground));
++
++		append(preview, $('.bar'));
++		const code = append(preview, $('.code'));
++		const line = (indent: boolean, parts: [string, string?][]) => {
++			const element = append(code, $('div', indent ? { class: 'indent' } : undefined));
++			for (const [text, kind] of parts) {
++				append(element, $('span', kind ? { class: kind } : undefined)).textContent = text;
++			}
++		};
++		line(false, [['function', 'keyword'], [' '], ['add', 'function'], ['(x, y) {']]);
++		line(true, [['return', 'keyword'], [' x + y;']]);
++		line(true, [['// adds two numbers', 'comment']]);
++		line(false, [['}']]);
++	}
++
++	// ---------------- helpers ----------------
++
++	private addButton(store: DisposableStore, container: HTMLElement, label: string, onClick: () => void, options: { primary: boolean }): Button {
++		const button = store.add(new Button(container, { ...defaultButtonStyles, secondary: !options.primary }));
++		button.label = label;
++		button.element.classList.add('loophole-onboarding-button');
++		if (options.primary) {
++			button.element.classList.add('loophole-onboarding-primary');
++		}
++		store.add(button.onDidClick(() => onClick()));
++		return button;
++	}
++
++	private trapFocus(e: KeyboardEvent): void {
++		if (e.key !== 'Tab') {
++			return;
++		}
++
++		const focusable = Array.from(this.root.querySelectorAll<HTMLElement>('button:not([disabled]):not(.hidden), .monaco-button:not(.disabled)'));
++		if (focusable.length === 0) {
++			return;
++		}
++
++		const first = focusable[0];
++		const last = focusable[focusable.length - 1];
++		const active = getActiveElement();
++		if (e.shiftKey && (active === first || !this.root.contains(active))) {
++			e.preventDefault();
++			last.focus();
++		} else if (!e.shiftKey && (active === last || !this.root.contains(active))) {
++			e.preventDefault();
++			first.focus();
++		}
++	}
++
++	private complete(): void {
++		if (this.completed) {
++			return;
++		}
++		this.completed = true;
++		this._onDidComplete.fire();
++
++		this.root.classList.add('closing');
++		this.root.setAttribute('aria-hidden', 'true');
++		if (this.previouslyFocused instanceof getWindow(this.root).HTMLElement) {
++			this.previouslyFocused.focus();
++		}
++		this._register(disposableTimeout(() => this.dispose(), FADE_OUT_MS));
++	}
++
++	override dispose(): void {
++		this.root.remove();
++		super.dispose();
++	}
++}
++
++/** The color a theme gives to the first of these TextMate scopes it styles, preferring the most specific rule. */
++function tokenColor(theme: IWorkbenchColorTheme, scopes: string[], fallback: string | undefined): string {
++	for (const scope of scopes) {
++		let best: { specificity: number; color: string } | undefined;
++		for (const rule of theme.tokenColors) {
++			const foreground = rule.settings.foreground;
++			if (!foreground || !rule.scope) {
++				continue;
++			}
++
++			const ruleScopes = Array.isArray(rule.scope) ? rule.scope : rule.scope.split(',');
++			for (const ruleScope of ruleScopes.map(s => s.trim())) {
++				const matches = ruleScope === scope || scope.startsWith(`${ruleScope}.`);
++				if (matches && (!best || ruleScope.length >= best.specificity)) {
++					best = { specificity: ruleScope.length, color: foreground };
++				}
++			}
++		}
++		if (best) {
++			return best.color;
++		}
++	}
++	return fallback ?? 'inherit';
++}
+diff --git a/src/vs/workbench/contrib/loopholeOnboarding/browser/media/loophole-mark.svg b/src/vs/workbench/contrib/loopholeOnboarding/browser/media/loophole-mark.svg
+new file mode 100644
+index 00000000..018aadb5
+--- /dev/null
++++ b/src/vs/workbench/contrib/loopholeOnboarding/browser/media/loophole-mark.svg
+@@ -0,0 +1,4 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40">
++  <path transform="translate(-1.791 -0.399) scale(0.08116)" fill="#000" fill-rule="evenodd" d="M209.50,422.51C187.15,417.85,170.91,402.95,162.28,379.20C149.84,344.94,149.02,300.64,159.63,236.50C160.45,231.55,161.52,225.03,162.01,222.00C164.12,208.97,166.10,199.03,173.05,166.65C175.06,157.29,188.85,102.12,192.78,87.74C193.80,84.02,195.05,80.55,195.56,80.04C196.51,79.09,251.67,78.34,252.59,79.26C252.86,79.53,252.64,82.39,252.10,85.63C245.61,124.22,244.67,130.09,242.99,142.50C240.07,164.21,238.74,175.40,237.05,192.50C236.51,198.00,235.62,207.00,235.07,212.50C234.53,218.00,233.61,229.47,233.04,238.00C232.46,246.53,231.54,259.82,231.00,267.53C229.75,285.12,229.72,298.71,230.93,299.45C231.43,299.77,232.90,299.63,234.18,299.14C235.45,298.65,238.30,297.69,240.50,297.00C261.72,290.35,310.67,259.90,357.42,224.28C361.23,221.38,364.55,219.22,364.81,219.47C365.26,219.93,364.31,222.35,356.94,239.50C350.76,253.86,344.58,279.61,343.50,295.50C341.48,325.02,354.77,348.90,378.49,358.38C381.79,359.70,384.61,361.39,384.75,362.14C385.23,364.74,351.97,385.10,328.62,396.49C298.82,411.04,274.83,418.75,246.31,422.94C236.91,424.33,217.09,424.09,209.50,422.51Z"/>
++</svg>
+diff --git a/src/vs/workbench/contrib/loopholeOnboarding/browser/media/loopholeOnboarding.css b/src/vs/workbench/contrib/loopholeOnboarding/browser/media/loopholeOnboarding.css
+new file mode 100644
+index 00000000..cbf6939c
+--- /dev/null
++++ b/src/vs/workbench/contrib/loopholeOnboarding/browser/media/loopholeOnboarding.css
+@@ -0,0 +1,275 @@
++/*--------------------------------------------------------------------------------------
++ *  Copyright 2026 Loophole AI, Inc. All rights reserved.
++ *  See LICENSE.txt for more information.
++ *--------------------------------------------------------------------------------------*/
++
++.monaco-workbench .loophole-onboarding {
++	position: fixed;
++	inset: 0;
++	z-index: 3000; /* above quick input (2000) and dialogs (2600) */
++	display: flex;
++	align-items: center;
++	justify-content: center;
++	box-sizing: border-box;
++	padding: 32px;
++	overflow: auto;
++	background-color: var(--vscode-editor-background);
++	color: var(--vscode-foreground);
++	font-family: var(--vscode-font-family);
++	font-size: 14px;
++	opacity: 1;
++	transition: opacity 0.5s ease-in-out;
++}
++
++.monaco-workbench .loophole-onboarding.closing {
++	opacity: 0;
++	pointer-events: none;
++}
++
++.monaco-workbench .loophole-onboarding-content {
++	width: 100%;
++	max-width: 640px;
++	margin: auto;
++}
++
++.monaco-workbench .loophole-onboarding-page {
++	display: flex;
++	flex-direction: column;
++	align-items: center;
++	gap: 24px;
++	text-align: center;
++	animation: loophole-onboarding-fade-in 0.6s ease-out both;
++}
++
++.monaco-workbench .loophole-onboarding-title {
++	margin: 0;
++	font-size: 40px;
++	font-weight: 300;
++	line-height: 1.2;
++}
++
++.monaco-workbench .loophole-onboarding-subtitle {
++	max-width: 440px;
++	margin: 0;
++	line-height: 1.5;
++	color: var(--vscode-descriptionForeground);
++}
++
++/* ---- welcome ---- */
++
++.monaco-workbench .loophole-onboarding-logo {
++	width: 168px;
++	height: 168px;
++	background-color: var(--vscode-foreground);
++	-webkit-mask: url('./loophole-mark.svg') center / contain no-repeat;
++	mask: url('./loophole-mark.svg') center / contain no-repeat;
++	opacity: 0;
++	animation:
++		loophole-onboarding-logo-in 1.6s cubic-bezier(0.2, 0.7, 0.2, 1) forwards,
++		loophole-onboarding-logo-float 6s ease-in-out 1.6s infinite alternate;
++}
++
++.monaco-workbench .loophole-onboarding-page.welcome .fade-in-late {
++	opacity: 0;
++	animation: loophole-onboarding-fade-in 1s ease-out 1s forwards;
++}
++
++@keyframes loophole-onboarding-logo-in {
++	from { opacity: 0; transform: scale(0.9); }
++	to { opacity: 0.85; transform: scale(1); }
++}
++
++@keyframes loophole-onboarding-logo-float {
++	from { opacity: 0.85; transform: translateY(0); }
++	to { opacity: 0.6; transform: translateY(-6px); }
++}
++
++@keyframes loophole-onboarding-fade-in {
++	from { opacity: 0; }
++	to { opacity: 1; }
++}
++
++/* ---- buttons ---- */
++
++.monaco-workbench .loophole-onboarding-actions {
++	display: flex;
++	justify-content: center;
++	gap: 8px;
++	margin-top: 8px;
++}
++
++.monaco-workbench .loophole-onboarding-actions .monaco-button,
++.monaco-workbench .loophole-onboarding-import .monaco-button {
++	width: auto;
++	min-width: 96px;
++	padding: 8px 20px;
++}
++
++.monaco-workbench .loophole-onboarding-skip {
++	position: absolute;
++	top: 16px;
++	right: 20px;
++	padding: 4px 8px;
++	border: none;
++	background: transparent;
++	color: var(--vscode-descriptionForeground);
++	font: inherit;
++	cursor: pointer;
++}
++
++.monaco-workbench .loophole-onboarding-skip:hover {
++	color: var(--vscode-foreground);
++}
++
++.monaco-workbench .loophole-onboarding-skip.hidden {
++	display: none;
++}
++
++.monaco-workbench .loophole-onboarding-skip:focus-visible,
++.monaco-workbench .loophole-onboarding-theme:focus-visible {
++	outline: 1px solid var(--vscode-focusBorder);
++	outline-offset: 2px;
++}
++
++/* ---- themes ---- */
++
++.monaco-workbench .loophole-onboarding-themes {
++	display: grid;
++	grid-template-columns: repeat(2, minmax(0, 1fr));
++	gap: 16px;
++	width: 100%;
++}
++
++.monaco-workbench .loophole-onboarding-theme {
++	position: relative;
++	display: flex;
++	flex-direction: column;
++	gap: 10px;
++	padding: 12px;
++	border: 2px solid var(--vscode-panel-border, transparent);
++	border-radius: 10px;
++	background: transparent;
++	color: var(--vscode-foreground);
++	font: inherit;
++	cursor: pointer;
++	transition: border-color 0.2s ease;
++}
++
++.monaco-workbench .loophole-onboarding-theme:hover {
++	border-color: var(--vscode-descriptionForeground);
++}
++
++.monaco-workbench .loophole-onboarding-theme.selected {
++	border-color: var(--vscode-focusBorder);
++}
++
++.monaco-workbench .loophole-onboarding-theme .check {
++	position: absolute;
++	top: 18px;
++	right: 18px;
++	display: none;
++	color: var(--vscode-focusBorder);
++}
++
++.monaco-workbench .loophole-onboarding-theme.selected .check {
++	display: block;
++}
++
++.monaco-workbench .loophole-onboarding-theme .preview {
++	display: flex;
++	flex-direction: column;
++	height: 128px;
++	overflow: hidden;
++	border-radius: 6px;
++	background-color: var(--preview-background);
++	color: var(--preview-foreground);
++	font-family: var(--monaco-monospace-font, monospace);
++	font-size: 11px;
++	text-align: left;
++}
++
++.monaco-workbench .loophole-onboarding-theme .preview .bar {
++	flex: none;
++	height: 14px;
++	background-color: var(--preview-bar);
++}
++
++.monaco-workbench .loophole-onboarding-theme .preview .code {
++	padding: 10px;
++	line-height: 1.6;
++	white-space: pre;
++}
++
++.monaco-workbench .loophole-onboarding-theme .preview .code .indent {
++	padding-left: 12px;
++}
++
++.monaco-workbench .loophole-onboarding-theme .preview .keyword { color: var(--preview-keyword); }
++.monaco-workbench .loophole-onboarding-theme .preview .function { color: var(--preview-function); }
++.monaco-workbench .loophole-onboarding-theme .preview .comment { color: var(--preview-comment); }
++
++.monaco-workbench .loophole-onboarding-theme .name {
++	font-weight: 500;
++}
++
++/* ---- import ---- */
++
++.monaco-workbench .loophole-onboarding-import {
++	display: flex;
++	flex-direction: column;
++	align-items: center;
++	gap: 8px;
++}
++
++.monaco-workbench .loophole-onboarding-status {
++	min-height: 20px;
++	max-width: 440px;
++	line-height: 1.5;
++	white-space: pre-line;
++	color: var(--vscode-descriptionForeground);
++}
++
++.monaco-workbench .loophole-onboarding-status.error {
++	color: var(--vscode-errorForeground);
++}
++
++/* ---- progress dots ---- */
++
++.monaco-workbench .loophole-onboarding-dots {
++	position: absolute;
++	bottom: 24px;
++	left: 0;
++	right: 0;
++	display: flex;
++	justify-content: center;
++	gap: 8px;
++}
++
++.monaco-workbench .loophole-onboarding-dot {
++	width: 6px;
++	height: 6px;
++	border-radius: 50%;
++	background-color: var(--vscode-descriptionForeground);
++	opacity: 0.4;
++	transition: opacity 0.3s ease;
++}
++
++.monaco-workbench .loophole-onboarding-dot.active {
++	opacity: 1;
++}
++
++/* ---- motion ---- */
++
++.monaco-reduce-motion .loophole-onboarding,
++.monaco-reduce-motion .loophole-onboarding * {
++	animation-duration: 0.01ms !important;
++	animation-delay: 0s !important;
++	animation-iteration-count: 1 !important;
++	transition-duration: 0.01ms !important;
++}
++
++@media (max-width: 520px) {
++	.monaco-workbench .loophole-onboarding-themes {
++		grid-template-columns: minmax(0, 1fr);
++	}
++}
+diff --git a/src/vs/workbench/contrib/loopholeOnboarding/common/loopholeOnboarding.ts b/src/vs/workbench/contrib/loopholeOnboarding/common/loopholeOnboarding.ts
+new file mode 100644
+index 00000000..b157184b
+--- /dev/null
++++ b/src/vs/workbench/contrib/loopholeOnboarding/common/loopholeOnboarding.ts
+@@ -0,0 +1,22 @@
++/*--------------------------------------------------------------------------------------
++ *  Copyright 2026 Loophole AI, Inc. All rights reserved.
++ *  See LICENSE.txt for more information.
++ *--------------------------------------------------------------------------------------*/
++
++import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
++
++/** Set once the person has finished (or skipped) the onboarding. */
++export const LOOPHOLE_ONBOARDING_COMPLETED_KEY = 'loopholeOnboarding.completed';
++
++/** The color themes offered on the theme page, by their id in `workbench.colorTheme`. */
++export const LOOPHOLE_ONBOARDING_THEMES: readonly string[] = ['Loophole Dark', 'Loophole Light', 'Dark 2026', 'Light 2026'];
++
++export const ILoopholeOnboardingService = createDecorator<ILoopholeOnboardingService>('loopholeOnboardingService');
++
++export interface ILoopholeOnboardingService {
++
++	readonly _serviceBrand: undefined;
++
++	/** Opens the onboarding on top of the workbench. Does nothing if it is already open. */
++	show(): void;
++}
+diff --git a/src/vs/workbench/contrib/loopholeOnboarding/electron-browser/loopholeOnboarding.contribution.ts b/src/vs/workbench/contrib/loopholeOnboarding/electron-browser/loopholeOnboarding.contribution.ts
+new file mode 100644
+index 00000000..464fd5a1
+--- /dev/null
++++ b/src/vs/workbench/contrib/loopholeOnboarding/electron-browser/loopholeOnboarding.contribution.ts
+@@ -0,0 +1,80 @@
++/*--------------------------------------------------------------------------------------
++ *  Copyright 2026 Loophole AI, Inc. All rights reserved.
++ *  See LICENSE.txt for more information.
++ *--------------------------------------------------------------------------------------*/
++
++import { Disposable } from '../../../../base/common/lifecycle.js';
++import { localize2 } from '../../../../nls.js';
++import { Categories } from '../../../../platform/action/common/actionCommonCategories.js';
++import { Action2, registerAction2 } from '../../../../platform/actions/common/actions.js';
++import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
++import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
++import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
++import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
++import { IWorkbenchEnvironmentService } from '../../../services/environment/common/environmentService.js';
++import { LoopholeOnboarding } from '../browser/loopholeOnboarding.js';
++import { ILoopholeOnboardingService, LOOPHOLE_ONBOARDING_COMPLETED_KEY } from '../common/loopholeOnboarding.js';
++
++class LoopholeOnboardingService implements ILoopholeOnboardingService {
++
++	declare readonly _serviceBrand: undefined;
++
++	private onboarding: LoopholeOnboarding | undefined;
++
++	constructor(
++		@IInstantiationService private readonly instantiationService: IInstantiationService,
++		@IStorageService private readonly storageService: IStorageService,
++	) { }
++
++	show(): void {
++		if (this.onboarding) {
++			return;
++		}
++
++		const onboarding = this.onboarding = this.instantiationService.createInstance(LoopholeOnboarding);
++		onboarding.onDidComplete(() => {
++			this.storageService.store(LOOPHOLE_ONBOARDING_COMPLETED_KEY, true, StorageScope.APPLICATION, StorageTarget.USER);
++			this.onboarding = undefined;
++		});
++	}
++}
++
++registerSingleton(ILoopholeOnboardingService, LoopholeOnboardingService, InstantiationType.Delayed);
++
++/** Shows the onboarding on the first start, until it has been completed or skipped. */
++class LoopholeOnboardingContribution extends Disposable implements IWorkbenchContribution {
++
++	static readonly ID = 'workbench.contrib.loopholeOnboarding';
++
++	constructor(
++		@IStorageService storageService: IStorageService,
++		@IWorkbenchEnvironmentService environmentService: IWorkbenchEnvironmentService,
++		@ILoopholeOnboardingService onboardingService: ILoopholeOnboardingService,
++	) {
++		super();
++
++		if (environmentService.skipWelcome || storageService.getBoolean(LOOPHOLE_ONBOARDING_COMPLETED_KEY, StorageScope.APPLICATION, false)) {
++			return;
++		}
++
++		onboardingService.show();
++	}
++}
++
++registerWorkbenchContribution2(LoopholeOnboardingContribution.ID, LoopholeOnboardingContribution, WorkbenchPhase.AfterRestored);
++
++registerAction2(class ShowLoopholeOnboardingAction extends Action2 {
++
++	constructor() {
++		super({
++			id: 'workbench.action.showLoopholeOnboarding',
++			title: localize2('showLoopholeOnboarding', "Show Loophole Onboarding"),
++			category: Categories.Help,
++			f1: true,
++		});
++	}
++
++	run(accessor: ServicesAccessor): void {
++		accessor.get(ILoopholeOnboardingService).show();
++	}
++});
+diff --git a/src/vs/workbench/workbench.desktop.main.ts b/src/vs/workbench/workbench.desktop.main.ts
+index 3760a5be..4cf21feb 100644
+--- a/src/vs/workbench/workbench.desktop.main.ts
++++ b/src/vs/workbench/workbench.desktop.main.ts
+@@ -218,6 +218,9 @@ import './contrib/keybindings/electron-browser/systemWideKeybindings.contributio
+ // Loophole: import settings from other editors
+ import './contrib/loopholeOnboarding/electron-browser/extensionTransfer.contribution.js';
+ 
++// Loophole: first-run onboarding
++import './contrib/loopholeOnboarding/electron-browser/loopholeOnboarding.contribution.js';
++
+ //#endregion
+ 
+ 
+-- 
+2.43.0
+

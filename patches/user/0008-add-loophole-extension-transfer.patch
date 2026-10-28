@@ -1,0 +1,268 @@
+From 81d5818c2cc8a8cf78ca035175fe1eae43a88e12 Mon Sep 17 00:00:00 2001
+From: Garv <garvagnihotri22@gmail.com>
+Date: Wed, 28 Oct 2026 09:00:00 +0000
+Subject: [PATCH] feat(onboarding): add import from VS Code, Cursor and
+ Windsurf
+
+- add IExtensionTransferService: copies settings.json,
+  keybindings.json and the extensions folder from VS Code, Cursor or Windsurf into Loophole.
+- an existing settings.json / keybindings.json is backed up as *.loophole-backup before it is overwritten,
+  and extensions.json is merged, so what is already installed in Loophole is kept.
+- skips remote, Copilot and other AI extensions, and the Kilo agent that Loophole already ships.
+- returns what was imported and per-item errors, so the UI can say when an editor has nothing to import.
+- only registered in the desktop build (workbench.desktop.main.ts); it needs the local file system.
+---
+ .../common/extensionTransfer.ts               |  38 ++++
+ .../extensionTransfer.contribution.ts         |   7 +
+ .../extensionTransferService.ts               | 170 ++++++++++++++++++
+ src/vs/workbench/workbench.desktop.main.ts    |   3 +
+ 4 files changed, 218 insertions(+)
+ create mode 100644 src/vs/workbench/contrib/loopholeOnboarding/common/extensionTransfer.ts
+ create mode 100644 src/vs/workbench/contrib/loopholeOnboarding/electron-browser/extensionTransfer.contribution.ts
+ create mode 100644 src/vs/workbench/contrib/loopholeOnboarding/electron-browser/extensionTransferService.ts
+
+diff --git a/src/vs/workbench/contrib/loopholeOnboarding/common/extensionTransfer.ts b/src/vs/workbench/contrib/loopholeOnboarding/common/extensionTransfer.ts
+new file mode 100644
+index 00000000..413abd94
+--- /dev/null
++++ b/src/vs/workbench/contrib/loopholeOnboarding/common/extensionTransfer.ts
+@@ -0,0 +1,36 @@
++/*--------------------------------------------------------------------------------------
++ *  Copyright 2026 Loophole AI, Inc. All rights reserved.
++ *  See LICENSE.txt for more information.
++ *--------------------------------------------------------------------------------------*/
++
++import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
++
++/** Editors we know how to import from. */
++export type TransferEditorType = 'VS Code' | 'Cursor' | 'Windsurf';
++
++export const transferEditorTypes: readonly TransferEditorType[] = ['VS Code', 'Cursor', 'Windsurf'];
++
++/** The things an import can copy over. */
++export type TransferItemKind = 'settings' | 'keybindings' | 'extensions';
++
++export interface IExtensionTransferResult {
++
++	/** What was found in the other editor and copied over. Empty if the editor has nothing to import. */
++	readonly imported: readonly TransferItemKind[];
++
++	/** One message per item that could not be copied. */
++	readonly errors: readonly string[];
++}
++
++export const IExtensionTransferService = createDecorator<IExtensionTransferService>('loopholeExtensionTransferService');
++
++export interface IExtensionTransferService {
++
++	readonly _serviceBrand: undefined;
++
++	/**
++	 * Copies the settings, keybindings and extensions of another editor into Loophole.
++	 * Settings and keybindings that already exist are backed up next to the originals first.
++	 */
++	transferFromEditor(editor: TransferEditorType): Promise<IExtensionTransferResult>;
++}
+diff --git a/src/vs/workbench/contrib/loopholeOnboarding/electron-browser/extensionTransfer.contribution.ts b/src/vs/workbench/contrib/loopholeOnboarding/electron-browser/extensionTransfer.contribution.ts
+new file mode 100644
+index 00000000..af6765b1
+--- /dev/null
++++ b/src/vs/workbench/contrib/loopholeOnboarding/electron-browser/extensionTransfer.contribution.ts
+@@ -0,0 +1,7 @@
++/*--------------------------------------------------------------------------------------
++ *  Copyright 2026 Loophole AI, Inc. All rights reserved.
++ *  See LICENSE.txt for more information.
++ *--------------------------------------------------------------------------------------*/
++
++// Registers the service that imports settings, keybindings and extensions from VS Code, Cursor and Windsurf.
++import './extensionTransferService.js';
+diff --git a/src/vs/workbench/contrib/loopholeOnboarding/electron-browser/extensionTransferService.ts b/src/vs/workbench/contrib/loopholeOnboarding/electron-browser/extensionTransferService.ts
+new file mode 100644
+index 00000000..8f5ecb0d
+--- /dev/null
++++ b/src/vs/workbench/contrib/loopholeOnboarding/electron-browser/extensionTransferService.ts
+@@ -0,0 +1,167 @@
++/*--------------------------------------------------------------------------------------
++ *  Copyright 2026 Loophole AI, Inc. All rights reserved.
++ *  See LICENSE.txt for more information.
++ *--------------------------------------------------------------------------------------*/
++
++import { VSBuffer } from '../../../../base/common/buffer.js';
++import { toErrorMessage } from '../../../../base/common/errorMessage.js';
++import { isMacintosh, isWindows } from '../../../../base/common/platform.js';
++import { env } from '../../../../base/common/process.js';
++import { basename, dirname } from '../../../../base/common/resources.js';
++import { URI } from '../../../../base/common/uri.js';
++import { IFileService } from '../../../../platform/files/common/files.js';
++import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
++import { ILogService } from '../../../../platform/log/common/log.js';
++import { INativeWorkbenchEnvironmentService } from '../../../services/environment/electron-browser/environmentService.js';
++import { IExtensionTransferResult, IExtensionTransferService, TransferEditorType, TransferItemKind } from '../common/extensionTransfer.js';
++
++/**
++ * Extensions that are not copied over (matched against the extension id / folder name, lower case).
++ */
++const extensionBlacklist = [
++	// remote development extensions only work in Microsoft's builds
++	'ms-vscode-remote.remote', // ms-vscode-remote.remote-ssh, ms-vscode-remote.remote-wsl
++	'ms-vscode.remote', // ms-vscode.remote-explorer
++	// Loophole ships its own agent (built in), a second copy would clash with it
++	'kilocode.kilo-code',
++	// other AI assistants that would fight over the same keybindings
++	'sourcegraph.cody-ai',
++	'continue.continue',
++	'codeium.codeium',
++	'saoudrizwan.claude-dev', // cline
++	'rooveterinaryinc.roo-cline', // roo
++	'supermaven.supermaven',
++	'github.copilot', // also matches github.copilot-chat
++];
++
++function isBlacklisted(idOrName: string | undefined): boolean {
++	const value = idOrName?.toLowerCase();
++	return !!value && extensionBlacklist.some(item => value.includes(item));
++}
++
++/**
++ * Where each editor keeps its data.
++ * https://code.visualstudio.com/docs/editor/extension-marketplace#_where-are-extensions-installed
++ */
++const editorLocations: Record<TransferEditorType, { appFolder: string; dataFolder: string }> = {
++	'VS Code': { appFolder: 'Code', dataFolder: '.vscode' },
++	'Cursor': { appFolder: 'Cursor', dataFolder: '.cursor' },
++	'Windsurf': { appFolder: 'Windsurf', dataFolder: '.windsurf' },
++};
++
++interface ITransferItem {
++	readonly kind: TransferItemKind;
++	readonly from: URI;
++	readonly to: URI;
++}
++
++interface IExtensionManifestEntry {
++	readonly identifier?: { readonly id?: string };
++}
++
++class ExtensionTransferService implements IExtensionTransferService {
++
++	declare readonly _serviceBrand: undefined;
++
++	constructor(
++		@IFileService private readonly fileService: IFileService,
++		@INativeWorkbenchEnvironmentService private readonly environmentService: INativeWorkbenchEnvironmentService,
++		@ILogService private readonly logService: ILogService,
++	) { }
++
++	async transferFromEditor(editor: TransferEditorType): Promise<IExtensionTransferResult> {
++		const imported: TransferItemKind[] = [];
++		const errors: string[] = [];
++
++		for (const item of this.getTransferItems(editor)) {
++			try {
++				if (!await this.fileService.exists(item.from)) {
++					this.logService.info(`[loophole onboarding] nothing to import, ${item.from.toString()} does not exist`);
++					continue;
++				}
++
++				if (item.kind === 'extensions') {
++					await this.copyExtensions(item.from, item.to);
++				} else {
++					await this.copyFile(item.from, item.to);
++				}
++				imported.push(item.kind);
++			} catch (error) {
++				this.logService.error(`[loophole onboarding] could not import ${item.from.toString()}`, error);
++				errors.push(`${basename(item.from)}: ${toErrorMessage(error)}`);
++			}
++		}
++
++		return { imported, errors };
++	}
++
++	private getTransferItems(editor: TransferEditorType): ITransferItem[] {
++		const { appFolder, dataFolder } = editorLocations[editor];
++		const home = this.environmentService.userHome;
++
++		let appData: URI;
++		if (isWindows) {
++			appData = env['APPDATA'] ? URI.file(env['APPDATA']) : URI.joinPath(home, 'AppData', 'Roaming');
++		} else if (isMacintosh) {
++			appData = URI.joinPath(home, 'Library', 'Application Support');
++		} else {
++			appData = env['XDG_CONFIG_HOME'] ? URI.file(env['XDG_CONFIG_HOME']) : URI.joinPath(home, '.config');
++		}
++
++		const fromUserFolder = URI.joinPath(appData, appFolder, 'User');
++		const toUserFolder = this.environmentService.appSettingsHome;
++
++		return [
++			{ kind: 'settings', from: URI.joinPath(fromUserFolder, 'settings.json'), to: URI.joinPath(toUserFolder, 'settings.json') },
++			{ kind: 'keybindings', from: URI.joinPath(fromUserFolder, 'keybindings.json'), to: URI.joinPath(toUserFolder, 'keybindings.json') },
++			{ kind: 'extensions', from: URI.joinPath(home, dataFolder, 'extensions'), to: URI.file(this.environmentService.extensionsPath) },
++		];
++	}
++
++	private async copyFile(from: URI, to: URI): Promise<void> {
++		if (await this.fileService.exists(to)) {
++			// don't silently throw away what the user already has
++			await this.fileService.copy(to, URI.joinPath(dirname(to), `${basename(to)}.loophole-backup`), true);
++		} else {
++			await this.fileService.createFolder(dirname(to));
++		}
++
++		await this.fileService.copy(from, to, true);
++	}
++
++	private async copyExtensions(from: URI, to: URI): Promise<void> {
++		await this.fileService.createFolder(to);
++
++		const stat = await this.fileService.resolve(from);
++		for (const child of stat.children ?? []) {
++			if (child.isDirectory) {
++				if (!isBlacklisted(child.name)) {
++					await this.fileService.copy(child.resource, URI.joinPath(to, child.name), true);
++				}
++			} else if (child.name === 'extensions.json') {
++				await this.mergeExtensionsManifest(child.resource, URI.joinPath(to, child.name));
++			}
++		}
++	}
++
++	/**
++	 * extensions.json lists the installed extensions. Merge instead of replace,
++	 * so the extensions that are already installed in Loophole are not forgotten.
++	 */
++	private async mergeExtensionsManifest(from: URI, to: URI): Promise<void> {
++		const imported = (await this.readManifest(from)).filter(entry => !isBlacklisted(entry.identifier?.id));
++		const importedIds = new Set(imported.map(entry => entry.identifier?.id?.toLowerCase()));
++		const existing = (await this.fileService.exists(to) ? await this.readManifest(to) : [])
++			.filter(entry => !importedIds.has(entry.identifier?.id?.toLowerCase()));
++
++		await this.fileService.writeFile(to, VSBuffer.fromString(JSON.stringify([...existing, ...imported])));
++	}
++
++	private async readManifest(resource: URI): Promise<IExtensionManifestEntry[]> {
++		const content = await this.fileService.readFile(resource);
++		const manifest: unknown = JSON.parse(content.value.toString());
++		return Array.isArray(manifest) ? manifest : [];
++	}
++}
++
++registerSingleton(IExtensionTransferService, ExtensionTransferService, InstantiationType.Delayed);
+diff --git a/src/vs/workbench/workbench.desktop.main.ts b/src/vs/workbench/workbench.desktop.main.ts
+index 60a967c2..3760a5be 100644
+--- a/src/vs/workbench/workbench.desktop.main.ts
++++ b/src/vs/workbench/workbench.desktop.main.ts
+@@ -215,6 +215,9 @@ import './contrib/keybindingsExport/electron-browser/keybindingsExport.contribut
+ // System-wide (OS global) Keybindings
+ import './contrib/keybindings/electron-browser/systemWideKeybindings.contribution.js';
+ 
++// Loophole: import settings from other editors
++import './contrib/loopholeOnboarding/electron-browser/extensionTransfer.contribution.js';
++
+ //#endregion
+ 
+ 
+-- 
+2.43.0
+

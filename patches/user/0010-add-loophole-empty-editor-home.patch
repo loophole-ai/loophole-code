@@ -1,0 +1,360 @@
+From 3119d7cc17b7a432cbf10c52043a5115e5478948 Mon Sep 17 00:00:00 2001
+From: Garv <garvagnihotri22@gmail.com>
+Date: Wed, 28 Oct 2026 10:00:00 +0000
+Subject: [PATCH] feat(home): add the Loophole home screen to the empty editor
+
+- port of Void's EmptyEditorHome.tsx as plain DOM: the logo, the tagline ("Beyond Code Completion" /
+  "An Agentic AI IDE") and a keyboard shortcut list, in the watermark of an empty editor group.
+- editorGroupWatermark.ts: replace the stock entries (Open Chat, Open Recent, ...) with the Loophole list from
+  the new emptyEditorHome.ts, and rebuild the list whenever keybindings change, since the agent extension
+  registers its keybindings after startup.
+- the AI entries point at the Loophole agent (Kilo) commands instead of Void's Ctrl+L / Ctrl+K actions:
+  Chat (kilo-code.new.focusChatInput), Suggest Edits (...autocomplete.generateSuggestions, Ctrl+L),
+  Add to Context (kilo-code.new.addToContext, Ctrl+K Ctrl+A) and Agent Manager.
+- only shortcuts that really have a keybinding are listed, so unbinding a key removes the row.
+- the logo is the Loophole mark as a CSS mask in the foreground color instead of the faint letterpress image.
+---
+ .../parts/editor/editorGroupWatermark.ts      | 125 ++----------------
+ .../browser/parts/editor/emptyEditorHome.ts   |  54 ++++++++
+ .../parts/editor/media/emptyEditorHome.css    |  49 +++++++
+ .../parts/editor/media/loophole-mark.svg      |   4 +
+ 4 files changed, 120 insertions(+), 112 deletions(-)
+ create mode 100644 src/vs/workbench/browser/parts/editor/emptyEditorHome.ts
+ create mode 100644 src/vs/workbench/browser/parts/editor/media/emptyEditorHome.css
+ create mode 100644 src/vs/workbench/browser/parts/editor/media/loophole-mark.svg
+
+diff --git a/src/vs/workbench/browser/parts/editor/editorGroupWatermark.ts b/src/vs/workbench/browser/parts/editor/editorGroupWatermark.ts
+index a63f37ce..753c67ab 100644
+--- a/src/vs/workbench/browser/parts/editor/editorGroupWatermark.ts
++++ b/src/vs/workbench/browser/parts/editor/editorGroupWatermark.ts
+@@ -5,76 +5,20 @@
+ 
+ import { $, append, clearNode, h } from '../../../../base/browser/dom.js';
+ import { KeybindingLabel } from '../../../../base/browser/ui/keybindingLabel/keybindingLabel.js';
+-import { coalesce, shuffle } from '../../../../base/common/arrays.js';
+ import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
+-import { isMacintosh, isWeb, OS } from '../../../../base/common/platform.js';
+-import { localize } from '../../../../nls.js';
++import { OS } from '../../../../base/common/platform.js';
+ import { MenuId } from '../../../../platform/actions/common/actions.js';
+ import { HiddenItemStrategy, MenuWorkbenchToolBar } from '../../../../platform/actions/browser/toolbar.js';
+ import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
+ import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
+-import { ContextKeyExpr, ContextKeyExpression, IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
+ import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+ import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
+-import { IStorageService, StorageScope, StorageTarget, WillSaveStateReason } from '../../../../platform/storage/common/storage.js';
+ import { defaultKeybindingLabelStyles } from '../../../../platform/theme/browser/defaultStyles.js';
+-import { IWorkspaceContextService, WorkbenchState } from '../../../../platform/workspace/common/workspace.js';
+-
+-interface WatermarkEntry {
+-	readonly id: string;
+-	readonly text: string;
+-	readonly when?: {
+-		native?: ContextKeyExpression;
+-		web?: ContextKeyExpression;
+-	};
+-}
+-
+-const showChatContextKey = ContextKeyExpr.and(ContextKeyExpr.equals('chatSetupHidden', false), ContextKeyExpr.equals('chatSetupDisabledInWorkspace', false));
+-
+-const openChat: WatermarkEntry = { text: localize('watermark.openChat', "Open Chat"), id: 'workbench.action.chat.open', when: { native: showChatContextKey, web: showChatContextKey } };
+-const showCommands: WatermarkEntry = { text: localize('watermark.showCommands', "Show All Commands"), id: 'workbench.action.showCommands' };
+-const gotoFile: WatermarkEntry = { text: localize('watermark.quickAccess', "Go to File"), id: 'workbench.action.quickOpen' };
+-const openFile: WatermarkEntry = { text: localize('watermark.openFile', "Open File"), id: 'workbench.action.files.openFile' };
+-const openFolder: WatermarkEntry = { text: localize('watermark.openFolder', "Open Folder"), id: 'workbench.action.files.openFolder' };
+-const openFileOrFolder: WatermarkEntry = { text: localize('watermark.openFileFolder', "Open File or Folder"), id: 'workbench.action.files.openFileFolder' };
+-const openRecent: WatermarkEntry = { text: localize('watermark.openRecent', "Open Recent"), id: 'workbench.action.openRecent' };
+-const newUntitledFile: WatermarkEntry = { text: localize('watermark.newUntitledFile', "New Untitled Text File"), id: 'workbench.action.files.newUntitledFile' };
+-const findInFiles: WatermarkEntry = { text: localize('watermark.findInFiles', "Find in Files"), id: 'workbench.action.findInFiles' };
+-const toggleTerminal: WatermarkEntry = { text: localize({ key: 'watermark.toggleTerminal', comment: ['toggle is a verb here'] }, "Toggle Terminal"), id: 'workbench.action.terminal.toggleTerminal', when: { web: ContextKeyExpr.equals('terminalProcessSupported', true) } };
+-const startDebugging: WatermarkEntry = { text: localize('watermark.startDebugging', "Start Debugging"), id: 'workbench.action.debug.start', when: { web: ContextKeyExpr.equals('terminalProcessSupported', true) } };
+-const openSettings: WatermarkEntry = { text: localize('watermark.openSettings', "Open Settings"), id: 'workbench.action.openSettings' };
+-
+-const baseEntries: WatermarkEntry[] = [
+-	openChat,
+-	showCommands,
+-];
+-
+-const emptyWindowEntries: WatermarkEntry[] = coalesce([
+-	...baseEntries,
+-	openRecent,
+-	...(isMacintosh && !isWeb ? [openFileOrFolder] : [openFile, openFolder]),
+-	isMacintosh && !isWeb ? newUntitledFile : undefined, // fill in one more on macOS to get to 5 entries
+-]);
+-
+-const workspaceEntries: WatermarkEntry[] = [
+-	...baseEntries,
+-];
+-
+-const otherEntries: WatermarkEntry[] = [
+-	gotoFile,
+-	findInFiles,
+-	startDebugging,
+-	toggleTerminal,
+-	openSettings,
+-];
++import { EMPTY_EDITOR_HOME_SHORTCUTS, renderEmptyEditorHomeHeading } from './emptyEditorHome.js';
+ 
+ export class EditorGroupWatermark extends Disposable {
+ 
+-	private static readonly CACHED_WHEN = 'editorGroupWatermark.whenConditions';
+ 	private static readonly SETTINGS_KEY = 'workbench.tips.enabled';
+-	private static readonly MINIMUM_ENTRIES = 3;
+-
+-	private readonly cachedWhen: { [when: string]: boolean };
+ 
+ 	private readonly shortcuts: HTMLElement;
+ 	private readonly toolbarContainer: HTMLElement;
+@@ -82,27 +26,21 @@ export class EditorGroupWatermark extends Disposable {
+ 	private readonly keybindingLabels = this._register(new DisposableStore());
+ 
+ 	private enabled = false;
+-	private workbenchState: WorkbenchState;
+ 
+ 	constructor(
+ 		container: HTMLElement,
+ 		@IKeybindingService private readonly keybindingService: IKeybindingService,
+-		@IWorkspaceContextService private readonly contextService: IWorkspaceContextService,
+-		@IContextKeyService private readonly contextKeyService: IContextKeyService,
+ 		@IConfigurationService private readonly configurationService: IConfigurationService,
+-		@IStorageService private readonly storageService: IStorageService,
+ 		@IInstantiationService private readonly instantiationService: IInstantiationService
+ 	) {
+ 		super();
+ 
+-		this.cachedWhen = this.storageService.getObject(EditorGroupWatermark.CACHED_WHEN, StorageScope.PROFILE, Object.create(null));
+-		this.workbenchState = this.contextService.getWorkbenchState();
+-
+ 		const elements = h('.editor-group-watermark-wrapper', [
+ 			h('.editor-group-watermark-toolbar-container@toolbarContainer'),
+-			h('.editor-group-watermark', [
++			h('.editor-group-watermark.loophole-home', [
+ 				h('.watermark-container', [
+ 					h('.letterpress'),
++					h('.loophole-home-heading@heading'),
+ 					h('.shortcuts@shortcuts'),
+ 				])
+ 			])
+@@ -111,6 +49,7 @@ export class EditorGroupWatermark extends Disposable {
+ 		append(container, elements.root);
+ 		this.shortcuts = elements.shortcuts;
+ 		this.toolbarContainer = elements.toolbarContainer;
++		renderEmptyEditorHomeHeading(elements.heading);
+ 
+ 		this._register(this.instantiationService.createInstance(MenuWorkbenchToolBar, this.toolbarContainer, MenuId.EditorGroupWatermarkToolbar, {
+ 			hiddenItemStrategy: HiddenItemStrategy.NoHide,
+@@ -132,27 +71,6 @@ export class EditorGroupWatermark extends Disposable {
+ 				this.render();
+ 			}
+ 		}));
+-
+-		this._register(this.contextService.onDidChangeWorkbenchState(workbenchState => {
+-			if (this.workbenchState !== workbenchState) {
+-				this.workbenchState = workbenchState;
+-				this.render();
+-			}
+-		}));
+-
+-		this._register(this.storageService.onWillSaveState(e => {
+-			if (e.reason === WillSaveStateReason.SHUTDOWN) {
+-				const entries = [...emptyWindowEntries, ...workspaceEntries, ...otherEntries];
+-				for (const entry of entries) {
+-					const when = isWeb ? entry.when?.web : entry.when?.native;
+-					if (when) {
+-						this.cachedWhen[entry.id] = this.contextKeyService.contextMatchesRules(when);
+-					}
+-				}
+-
+-				this.storageService.store(EditorGroupWatermark.CACHED_WHEN, JSON.stringify(this.cachedWhen), StorageScope.PROFILE, StorageTarget.MACHINE);
+-			}
+-		}));
+ 	}
+ 
+ 	private render(): void {
+@@ -165,20 +83,19 @@ export class EditorGroupWatermark extends Disposable {
+ 			return;
+ 		}
+ 
+-		const entries = this.filterEntries(this.workbenchState !== WorkbenchState.EMPTY ? workspaceEntries : emptyWindowEntries);
+-		if (entries.length < EditorGroupWatermark.MINIMUM_ENTRIES) {
+-			const additionalEntries = this.filterEntries(otherEntries);
+-			shuffle(additionalEntries);
+-			entries.push(...additionalEntries.slice(0, EditorGroupWatermark.MINIMUM_ENTRIES - entries.length));
+-		}
+-
+ 		const box = append(this.shortcuts, $('.watermark-box'));
+ 
++		// The list is rebuilt whenever the keybindings change: the keybindings of the agent extension
++		// are only registered after startup, and the person can rebind or unbind any of them.
+ 		const update = () => {
+ 			clearNode(box);
+ 			this.keybindingLabels.clear();
+ 
+-			for (const entry of entries) {
++			for (const entry of EMPTY_EDITOR_HOME_SHORTCUTS) {
++				if (!entry.isAgentCommand && !CommandsRegistry.getCommand(entry.id)) {
++					continue;
++				}
++
+ 				const keys = this.keybindingService.lookupKeybinding(entry.id);
+ 				if (!keys) {
+ 					continue;
+@@ -186,7 +103,7 @@ export class EditorGroupWatermark extends Disposable {
+ 
+ 				const dl = append(box, $('dl'));
+ 				const dt = append(dl, $('dt'));
+-				dt.textContent = entry.text;
++				dt.textContent = entry.label;
+ 
+ 				const dd = append(dl, $('dd'));
+ 
+@@ -198,20 +115,4 @@ export class EditorGroupWatermark extends Disposable {
+ 		update();
+ 		this.transientDisposables.add(this.keybindingService.onDidUpdateKeybindings(update));
+ 	}
+-
+-	private filterEntries(entries: WatermarkEntry[]): WatermarkEntry[] {
+-		const filteredEntries = entries
+-			.filter(entry => {
+-				if (this.cachedWhen[entry.id]) {
+-					return true; // cached from previous session
+-				}
+-
+-				const contextKey = isWeb ? entry.when?.web : entry.when?.native;
+-				return !contextKey /* works without context */ || this.contextKeyService.contextMatchesRules(contextKey);
+-			})
+-			.filter(entry => !!CommandsRegistry.getCommand(entry.id))
+-			.filter(entry => !!this.keybindingService.lookupKeybinding(entry.id));
+-
+-		return filteredEntries;
+-	}
+ }
+diff --git a/src/vs/workbench/browser/parts/editor/emptyEditorHome.ts b/src/vs/workbench/browser/parts/editor/emptyEditorHome.ts
+new file mode 100644
+index 00000000..a8681784
+--- /dev/null
++++ b/src/vs/workbench/browser/parts/editor/emptyEditorHome.ts
+@@ -0,0 +1,54 @@
++/*--------------------------------------------------------------------------------------
++ *  Copyright 2026 Loophole AI, Inc. All rights reserved.
++ *  See LICENSE.txt for more information.
++ *--------------------------------------------------------------------------------------*/
++
++import './media/emptyEditorHome.css';
++import { $, append } from '../../../../base/browser/dom.js';
++import { localize } from '../../../../nls.js';
++
++export interface IEmptyEditorHomeShortcut {
++
++	/** The command whose keybinding is shown. */
++	readonly id: string;
++
++	readonly label: string;
++
++	/**
++	 * The command is contributed by the built-in Loophole agent. Its keybindings are known as soon as the
++	 * extension is registered, but the command itself only exists once the extension has activated.
++	 */
++	readonly isAgentCommand?: boolean;
++}
++
++/**
++ * Commands of the Loophole agent (built-in Kilo extension) that the home screen points at.
++ * Which keys they use comes from the extension's keybindings, so nothing is hardcoded here.
++ */
++export const AgentCommand = {
++	Chat: 'kilo-code.new.focusChatInput',
++	SuggestEdits: 'kilo-code.new.autocomplete.generateSuggestions',
++	AddToContext: 'kilo-code.new.addToContext',
++	AgentManager: 'kilo-code.new.agentManagerOpen',
++} as const;
++
++/**
++ * The shortcuts worth surfacing on an empty editor. A shortcut without a keybinding
++ * (the person may have unbound it) is left out, so the list only ever shows keys that do something.
++ */
++export const EMPTY_EDITOR_HOME_SHORTCUTS: readonly IEmptyEditorHomeShortcut[] = [
++	{ id: AgentCommand.Chat, label: localize('emptyEditorHome.chat', "Chat"), isAgentCommand: true },
++	{ id: AgentCommand.SuggestEdits, label: localize('emptyEditorHome.suggestEdits', "Suggest Edits"), isAgentCommand: true },
++	{ id: AgentCommand.AddToContext, label: localize('emptyEditorHome.addToContext', "Add to Context"), isAgentCommand: true },
++	{ id: AgentCommand.AgentManager, label: localize('emptyEditorHome.agentManager', "Agent Manager"), isAgentCommand: true },
++	{ id: 'workbench.action.quickOpen', label: localize('emptyEditorHome.goToFile', "Go to File") },
++	{ id: 'workbench.action.showCommands', label: localize('emptyEditorHome.showCommands', "Show All Commands") },
++	{ id: 'workbench.action.openGlobalKeybindings', label: localize('emptyEditorHome.keyboardShortcuts', "Keyboard Shortcuts") },
++	{ id: 'workbench.action.terminal.toggleTerminal', label: localize('emptyEditorHome.toggleTerminal', "Toggle Terminal") },
++];
++
++/** The heading under the logo. */
++export function renderEmptyEditorHomeHeading(container: HTMLElement): void {
++	append(container, $('h1.loophole-home-title')).textContent = localize('emptyEditorHome.title', "Beyond Code Completion");
++	append(container, $('p.loophole-home-tagline')).textContent = localize('emptyEditorHome.tagline', "An Agentic AI IDE");
++}
+diff --git a/src/vs/workbench/browser/parts/editor/media/emptyEditorHome.css b/src/vs/workbench/browser/parts/editor/media/emptyEditorHome.css
+new file mode 100644
+index 00000000..ee83e094
+--- /dev/null
++++ b/src/vs/workbench/browser/parts/editor/media/emptyEditorHome.css
+@@ -0,0 +1,49 @@
++/*--------------------------------------------------------------------------------------
++ *  Copyright 2026 Loophole AI, Inc. All rights reserved.
++ *  See LICENSE.txt for more information.
++ *--------------------------------------------------------------------------------------*/
++
++/* The home screen of an empty editor: logo, tagline and shortcuts (see editorGroupWatermark.ts). */
++
++.monaco-workbench .part.editor > .content .editor-group-container > .editor-group-watermark-wrapper > .editor-group-watermark.loophole-home {
++	max-width: 340px;
++}
++
++/* The logo: the Loophole mark in the foreground color, instead of the faint letterpress image. */
++.monaco-workbench .part.editor > .content .editor-group-container > .editor-group-watermark-wrapper > .editor-group-watermark.loophole-home .letterpress {
++	width: 96px;
++	max-width: 96px;
++	max-height: 96px;
++	background-image: none;
++	background-color: var(--vscode-foreground);
++	-webkit-mask: url('./loophole-mark.svg') center / contain no-repeat;
++	mask: url('./loophole-mark.svg') center / contain no-repeat;
++	opacity: 0.9;
++}
++
++.monaco-workbench .part.editor > .content .editor-group-container > .editor-group-watermark-wrapper > .editor-group-watermark.loophole-home .loophole-home-heading {
++	display: flex;
++	flex-direction: column;
++	align-items: center;
++	gap: 6px;
++	text-align: center;
++}
++
++.monaco-workbench .part.editor > .content .editor-group-container > .editor-group-watermark-wrapper > .editor-group-watermark.loophole-home .loophole-home-title {
++	margin: 0;
++	font-size: 24px;
++	font-weight: 600;
++	line-height: 1.2;
++	color: var(--vscode-foreground);
++}
++
++.monaco-workbench .part.editor > .content .editor-group-container > .editor-group-watermark-wrapper > .editor-group-watermark.loophole-home .loophole-home-tagline {
++	margin: 0;
++	font-size: 14px;
++	color: var(--vscode-descriptionForeground);
++}
++
++/* a short group has no room for the heading and the list */
++.monaco-workbench .part.editor > .content .editor-group-container.max-height-478px > .editor-group-watermark-wrapper > .editor-group-watermark.loophole-home .loophole-home-heading {
++	display: none;
++}
+diff --git a/src/vs/workbench/browser/parts/editor/media/loophole-mark.svg b/src/vs/workbench/browser/parts/editor/media/loophole-mark.svg
+new file mode 100644
+index 00000000..018aadb5
+--- /dev/null
++++ b/src/vs/workbench/browser/parts/editor/media/loophole-mark.svg
+@@ -0,0 +1,4 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40">
++  <path transform="translate(-1.791 -0.399) scale(0.08116)" fill="#000" fill-rule="evenodd" d="M209.50,422.51C187.15,417.85,170.91,402.95,162.28,379.20C149.84,344.94,149.02,300.64,159.63,236.50C160.45,231.55,161.52,225.03,162.01,222.00C164.12,208.97,166.10,199.03,173.05,166.65C175.06,157.29,188.85,102.12,192.78,87.74C193.80,84.02,195.05,80.55,195.56,80.04C196.51,79.09,251.67,78.34,252.59,79.26C252.86,79.53,252.64,82.39,252.10,85.63C245.61,124.22,244.67,130.09,242.99,142.50C240.07,164.21,238.74,175.40,237.05,192.50C236.51,198.00,235.62,207.00,235.07,212.50C234.53,218.00,233.61,229.47,233.04,238.00C232.46,246.53,231.54,259.82,231.00,267.53C229.75,285.12,229.72,298.71,230.93,299.45C231.43,299.77,232.90,299.63,234.18,299.14C235.45,298.65,238.30,297.69,240.50,297.00C261.72,290.35,310.67,259.90,357.42,224.28C361.23,221.38,364.55,219.22,364.81,219.47C365.26,219.93,364.31,222.35,356.94,239.50C350.76,253.86,344.58,279.61,343.50,295.50C341.48,325.02,354.77,348.90,378.49,358.38C381.79,359.70,384.61,361.39,384.75,362.14C385.23,364.74,351.97,385.10,328.62,396.49C298.82,411.04,274.83,418.75,246.31,422.94C236.91,424.33,217.09,424.09,209.50,422.51Z"/>
++</svg>
+-- 
+2.43.0
+
