@@ -1,0 +1,105 @@
+From 9fb23ce026076e8fb19e82c5c7386010022c56dd Mon Sep 17 00:00:00 2001
+From: Garv <garvagnihotri22@gmail.com>
+Date: Thu, 29 Oct 2026 10:00:00 +0000
+Subject: [PATCH] feat(about): show the Loophole version instead of the VS Code
+ version
+
+- product.ts: add the optional `loopholeVersion` field to IProductConfiguration, read from product.json.
+- dialog.ts (native About dialog and the browser one): "Version:" now shows loopholeVersion. The VS Code base
+  version moves to its own "VS Code:" line, since extension compatibility, settings sync and the update channel
+  still depend on it and it is what a bug report needs.
+- updateTooltip.ts: "Current Version" shows loopholeVersion as well.
+- everything falls back to the VS Code version when product.json has no loopholeVersion, so nothing
+  changes until the field is set. product.version itself is not touched.
+---
+ src/vs/base/common/product.ts                         |  2 ++
+ src/vs/platform/dialogs/electron-browser/dialog.ts    | 11 ++++++++---
+ src/vs/workbench/browser/parts/dialogs/dialog.ts      | 10 +++++++---
+ .../workbench/contrib/update/browser/updateTooltip.ts |  3 ++-
+ 4 files changed, 19 insertions(+), 7 deletions(-)
+
+diff --git a/src/vs/base/common/product.ts b/src/vs/base/common/product.ts
+index 97c5f1a4..9e242193 100644
+--- a/src/vs/base/common/product.ts
++++ b/src/vs/base/common/product.ts
+@@ -98,6 +98,8 @@ export interface IDictationRuntimeProductConfig {
+ 
+ export interface IProductConfiguration {
+ 	readonly version: string;
++	/** The Loophole release people know, e.g. `1.0.0`. `version` is the VS Code base version and has to stay as it is. */
++	readonly loopholeVersion?: string;
+ 	readonly date?: string;
+ 	readonly quality?: string;
+ 	readonly commit?: string;
+diff --git a/src/vs/platform/dialogs/electron-browser/dialog.ts b/src/vs/platform/dialogs/electron-browser/dialog.ts
+index 39489aa4..a3cb9c42 100644
+--- a/src/vs/platform/dialogs/electron-browser/dialog.ts
++++ b/src/vs/platform/dialogs/electron-browser/dialog.ts
+@@ -15,20 +15,25 @@ function formatCopilotVersion(version: string | undefined): string {
+ }
+ 
+ export function createNativeAboutDialogDetails(productService: IProductService, osProps: IOSProperties): { title: string; details: string; detailsToCopy: string } {
+-	let version = productService.version;
++	// Show the Loophole version people know. `version` is the VS Code base version: extension compatibility,
++	// settings sync and the update channel depend on it, so it stays untouched and gets its own line.
++	const loopholeVersion = productService.loopholeVersion;
++	let version = loopholeVersion || productService.version;
+ 	if (productService.target) {
+ 		version = `${version} (${productService.target} setup)`;
+ 	} else if (productService.darwinUniversalAssetId) {
+ 		version = `${version} (Universal)`;
+ 	}
+ 
++	const vsCodeVersionLine = loopholeVersion ? `\n${localize('aboutVSCodeVersion', "VS Code: {0}", productService.version)}` : '';
+ 	const copilotRuntimeVersion = formatCopilotVersion(productService.copilotVersions?.runtime);
+ 	const copilotSdkVersion = formatCopilotVersion(productService.copilotVersions?.sdk);
+ 
+ 	const getDetails = (useAgo: boolean): string => {
+-		return localize({ key: 'aboutDetail', comment: ['Electron, Chromium, Node.js, V8 and Copilot are product names that need no translation'] },
+-			"Version: {0}\nCommit: {1}\nDate: {2}\nElectron: {3}\nElectronBuildId: {4}\nChromium: {5}\nNode.js: {6}\nV8: {7}\n@github/copilot: {8}\n@github/copilot-sdk: {9}\nOS: {10}",
++		return localize({ key: 'aboutDetailLoophole', comment: ['Electron, Chromium, Node.js, V8 and Copilot are product names that need no translation'] },
++			"Version: {0}{1}\nCommit: {2}\nDate: {3}\nElectron: {4}\nElectronBuildId: {5}\nChromium: {6}\nNode.js: {7}\nV8: {8}\n@github/copilot: {9}\n@github/copilot-sdk: {10}\nOS: {11}",
+ 			version,
++			vsCodeVersionLine,
+ 			productService.commit || 'Unknown',
+ 			productService.date ? `${productService.date}${useAgo ? ' (' + fromNow(new Date(productService.date), true) + ')' : ''}` : 'Unknown',
+ 			process.versions['electron'],
+diff --git a/src/vs/workbench/browser/parts/dialogs/dialog.ts b/src/vs/workbench/browser/parts/dialogs/dialog.ts
+index d45f6d77..6630faa0 100644
+--- a/src/vs/workbench/browser/parts/dialogs/dialog.ts
++++ b/src/vs/workbench/browser/parts/dialogs/dialog.ts
+@@ -53,10 +53,14 @@ export function createWorkbenchDialogOptions(
+ }
+ 
+ export function createBrowserAboutDialogDetails(productService: IProductService): { title: string; details: string; detailsToCopy: string } {
++	// Show the Loophole version people know. `version` is the VS Code base version and gets its own line.
++	const loopholeVersion = productService.loopholeVersion;
++	const vsCodeVersionLine = loopholeVersion ? `\n${localize('aboutVSCodeVersion', "VS Code: {0}", productService.version)}` : '';
+ 	const detailString = (useAgo: boolean): string => {
+-		return localize('aboutDetail',
+-			"Version: {0}\nCommit: {1}\nDate: {2}\nBrowser: {3}",
+-			productService.version || 'Unknown',
++		return localize('aboutDetailLoophole',
++			"Version: {0}{1}\nCommit: {2}\nDate: {3}\nBrowser: {4}",
++			loopholeVersion || productService.version || 'Unknown',
++			vsCodeVersionLine,
+ 			productService.commit || 'Unknown',
+ 			productService.date ? `${productService.date}${useAgo ? ' (' + fromNow(new Date(productService.date), true) + ')' : ''}` : 'Unknown',
+ 			navigator.userAgent
+diff --git a/src/vs/workbench/contrib/update/browser/updateTooltip.ts b/src/vs/workbench/contrib/update/browser/updateTooltip.ts
+index 1a69c83c..d8cd3168 100644
+--- a/src/vs/workbench/contrib/update/browser/updateTooltip.ts
++++ b/src/vs/workbench/contrib/update/browser/updateTooltip.ts
+@@ -139,7 +139,8 @@ export class UpdateTooltip extends Disposable {
+ 	}
+ 
+ 	private updateCurrentVersion() {
+-		const productVersion = this.productService.version;
++		// Show the Loophole version people know, not the VS Code base version.
++		const productVersion = this.productService.loopholeVersion || this.productService.version;
+ 		if (productVersion) {
+ 			const currentCommitId = this.productService.commit?.substring(0, 7);
+ 			this.currentVersionNode.textContent = currentCommitId
+-- 
+2.43.0
+

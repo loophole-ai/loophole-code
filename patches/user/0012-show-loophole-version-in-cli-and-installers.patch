@@ -1,0 +1,116 @@
+From e8de680ad67c12f890e27b08b43cc9cddeabbc75 Mon Sep 17 00:00:00 2001
+From: Garv <garvagnihotri22@gmail.com>
+Date: Thu, 29 Oct 2026 11:00:00 +0000
+Subject: [PATCH] feat(version): show the Loophole version in the CLI and the
+ installers
+
+- cli.ts: `--version` and the `--help` header print product.loopholeVersion instead of the VS Code base version.
+- gulpfile.vscode.linux.ts: the deb, rpm and snap packages are versioned with loopholeVersion.
+- gulpfile.vscode.win32.ts: the Windows installer (Version / RawVersion) uses loopholeVersion.
+- everything falls back to the VS Code based version when product.json has no loopholeVersion.
+- needs 0011-show-loophole-version (it adds loopholeVersion to the product type).
+- package.json's version, the commit and the update channel are not touched.
+---
+ build/gulpfile.vscode.linux.ts | 9 ++++++---
+ build/gulpfile.vscode.win32.ts | 7 +++++--
+ src/vs/code/node/cli.ts        | 9 ++++++---
+ 3 files changed, 17 insertions(+), 8 deletions(-)
+
+diff --git a/build/gulpfile.vscode.linux.ts b/build/gulpfile.vscode.linux.ts
+index 884da200..d9124369 100644
+--- a/build/gulpfile.vscode.linux.ts
++++ b/build/gulpfile.vscode.linux.ts
+@@ -25,6 +25,9 @@ const linuxDesktopName = product.linuxDesktopName;
+ 
+ const linuxPackageRevision = Math.floor(new Date().getTime() / 1000);
+ 
++// The Loophole version people know, falls back to the VS Code based one. Keep it a plain x.y.z, rpm does not allow '-' in it.
++const linuxPackageVersion = (product as typeof product & { loopholeVersion?: string }).loopholeVersion ?? packageJson.version;
++
+ function getDebPackageArch(arch: string): string {
+ 	switch (arch) {
+ 		case 'x64': return 'amd64';
+@@ -93,7 +96,7 @@ function prepareDebPackage(arch: string) {
+ 				const that = this;
+ 				gulp.src('resources/linux/debian/control.template', { base: '.' })
+ 					.pipe(replace('@@NAME@@', product.applicationName))
+-					.pipe(replace('@@VERSION@@', packageJson.version))
++					.pipe(replace('@@VERSION@@', linuxPackageVersion))
+ 					.pipe(replace('@@ARCHITECTURE@@', debArch))
+ 					.pipe(replace('@@DEPENDS@@', dependencies.join(', ')))
+ 					.pipe(replace('@@RECOMMENDS@@', debianRecommendedDependencies.join(', ')))
+@@ -206,7 +209,7 @@ function prepareRpmPackage(arch: string) {
+ 			.pipe(replace('@@NAME_LONG@@', product.nameLong))
+ 			.pipe(replace('@@DESKTOP_NAME@@', linuxDesktopName))
+ 			.pipe(replace('@@ICON@@', product.linuxIconName))
+-			.pipe(replace('@@VERSION@@', packageJson.version))
++			.pipe(replace('@@VERSION@@', linuxPackageVersion))
+ 			.pipe(replace('@@ARCHITECTURE@@', rpmArch))
+ 			.pipe(replace('@@LICENSE@@', product.licenseName))
+ 			.pipe(replace('@@QUALITY@@', (product as typeof product & { quality?: string }).quality || '@@QUALITY@@'))
+@@ -273,7 +276,7 @@ function prepareSnapPackage(arch: string) {
+ 
+ 		const snapcraft = gulp.src('resources/linux/snap/snapcraft.yaml', { base: '.' })
+ 			.pipe(replace('@@NAME@@', product.applicationName))
+-			.pipe(replace('@@VERSION@@', packageJson.version))
++			.pipe(replace('@@VERSION@@', linuxPackageVersion))
+ 			// Possible run-on values https://snapcraft.io/docs/architectures
+ 			.pipe(replace('@@ARCHITECTURE@@', arch === 'x64' ? 'amd64' : arch))
+ 			.pipe(rename('snap/snapcraft.yaml'));
+diff --git a/build/gulpfile.vscode.win32.ts b/build/gulpfile.vscode.win32.ts
+index 1f0f2d9e..69dacbf9 100644
+--- a/build/gulpfile.vscode.win32.ts
++++ b/build/gulpfile.vscode.win32.ts
+@@ -81,12 +81,15 @@ function buildWin32Setup(arch: string, target: string): task.CallbackTask {
+ 		const productJson = JSON.parse(fs.readFileSync(originalProductJsonPath, 'utf8'));
+ 		productJson['target'] = target;
+ 
++		// The Loophole version people know, falls back to the VS Code based one
++		const displayVersion = (product as typeof product & { loopholeVersion?: string }).loopholeVersion ?? pkg.version;
++
+ 		const definitions: Record<string, unknown> = {
+ 			NameLong: product.nameLong,
+ 			NameShort: product.nameShort,
+ 			DirName: product.win32DirName,
+-			Version: pkg.version,
+-			RawVersion: pkg.version.replace(/-\w+$/, ''),
++			Version: displayVersion,
++			RawVersion: displayVersion.replace(/-\w+$/, ''),
+ 			Commit: commit,
+ 			NameVersion: product.win32NameVersion + (target === 'user' ? ' (User)' : ''),
+ 			ExeBasename: product.nameShort,
+diff --git a/src/vs/code/node/cli.ts b/src/vs/code/node/cli.ts
+index 994f6c38..49014276 100644
+--- a/src/vs/code/node/cli.ts
++++ b/src/vs/code/node/cli.ts
+@@ -89,21 +89,24 @@ export async function main(argv: string[]): Promise<void> {
+ 		}
+ 	}
+ 
++	// Show the Loophole version people know, not the VS Code base version
++	const productVersion = product.loopholeVersion || product.version;
++
+ 	// Help (general)
+ 	if (args.help) {
+ 		const executable = `${product.applicationName}${isWindows ? '.exe' : ''}`;
+-		console.log(buildHelpMessage(product.nameLong, executable, product.version, OPTIONS));
++		console.log(buildHelpMessage(product.nameLong, executable, productVersion, OPTIONS));
+ 	}
+ 
+ 	// Help (chat)
+ 	else if (args.chat?.help) {
+ 		const executable = `${product.applicationName}${isWindows ? '.exe' : ''}`;
+-		console.log(buildHelpMessage(product.nameLong, executable, product.version, OPTIONS.chat.options, { isChat: true }));
++		console.log(buildHelpMessage(product.nameLong, executable, productVersion, OPTIONS.chat.options, { isChat: true }));
+ 	}
+ 
+ 	// Version Info
+ 	else if (args.version) {
+-		console.log(buildVersionMessage(product.version, product.commit));
++		console.log(buildVersionMessage(productVersion, product.commit));
+ 	}
+ 
+ 	// Shell integration
+-- 
+2.43.0
+
